@@ -112,7 +112,7 @@ class LocalDatabase {
     print('Seeding local database...');
     
     // 1. Seed Regions
-    final regions = [
+    final List<Map<String, dynamic>> regions = [
       {'region_id': 1, 'name': 'Delhi NCR', 'state': 'Delhi', 'district': 'Delhi', 'accident_risk_level': 3},
       {'region_id': 2, 'name': 'Mumbai MMR', 'state': 'Maharashtra', 'district': 'Mumbai', 'accident_risk_level': 4},
       {'region_id': 3, 'name': 'Bengaluru Urban', 'state': 'Karnataka', 'district': 'Bengaluru', 'accident_risk_level': 2},
@@ -122,7 +122,7 @@ class LocalDatabase {
     await _saveTable('regions');
 
     // 2. Seed Blood Banks
-    final banks = [
+    final List<Map<String, dynamic>> banks = [
       {'bank_id': 1, 'name': 'Delhi NCR Main Bank', 'location_lat': 28.6139, 'location_lng': 77.2090, 'region_id': 1, 'contact_phone': '+919876543210', 'address': 'Central Delhi, India', 'password_hash': 'e10adc3949ba59abbe56e057f20f883e', 'is_approved': true},
       {'bank_id': 2, 'name': 'Noida Metro Bank', 'location_lat': 28.5355, 'location_lng': 77.3910, 'region_id': 1, 'contact_phone': '+919876543211', 'address': 'Sector 18, Noida, India', 'password_hash': 'e10adc3949ba59abbe56e057f20f883e', 'is_approved': true},
       {'bank_id': 3, 'name': 'Gurgaon City Bank', 'location_lat': 28.4595, 'location_lng': 77.0266, 'region_id': 1, 'contact_phone': '+919876543212', 'address': 'DLF Phase 3, Gurgaon, India', 'password_hash': 'e10adc3949ba59abbe56e057f20f883e', 'is_approved': true},
@@ -140,7 +140,7 @@ class LocalDatabase {
     await _saveTable('blood_banks');
 
     // 3. Seed Hospitals
-    final hospitals = [
+    final List<Map<String, dynamic>> hospitals = [
       {'hospital_id': 1, 'name': 'Apollo Indraprastha Hospital', 'location_lat': 28.5350, 'location_lng': 77.2910, 'region_id': 1, 'address': 'Sarita Vihar, Delhi', 'avg_daily_consumption': {'O+': 4.5, 'O-': 1.0, 'A+': 3.2, 'A-': 0.8, 'B+': 3.5, 'B-': 0.6, 'AB+': 1.5, 'AB-': 0.4}},
       {'hospital_id': 2, 'name': 'Max Super Speciality Hospital', 'location_lat': 28.5284, 'location_lng': 77.2197, 'region_id': 1, 'address': 'Saket, Delhi', 'avg_daily_consumption': {'O+': 3.8, 'O-': 0.8, 'A+': 2.8, 'A-': 0.6, 'B+': 3.0, 'B-': 0.5, 'AB+': 1.2, 'AB-': 0.3}},
       {'hospital_id': 3, 'name': 'KEM Hospital Mumbai', 'location_lat': 19.0028, 'location_lng': 72.8422, 'region_id': 2, 'address': 'Parel, Mumbai', 'avg_daily_consumption': {'O+': 6.0, 'O-': 1.5, 'A+': 4.5, 'A-': 1.2, 'B+': 5.0, 'B-': 1.0, 'AB+': 2.0, 'AB-': 0.5}},
@@ -181,7 +181,7 @@ class LocalDatabase {
     await _saveTable('blood_inventory');
 
     // 5. Seed Donors (UCI representation)
-    final donors = [
+    final List<Map<String, dynamic>> donors = [
       {'donor_id': 1, 'firebase_uid': 'mock_uid_donor_1', 'name': 'Aditya Sharma', 'phone': '+919999999901', 'blood_group': 'O+', 'dob': '1990-05-15', 'location_lat': 28.6150, 'location_lng': 77.2110, 'is_eligible': true, 'response_count': 4, 'alert_count': 5, 'response_rate': 0.8, 'consent_given': true},
       {'donor_id': 2, 'firebase_uid': 'mock_uid_donor_2', 'name': 'Rajesh Kumar', 'phone': '+919999999902', 'blood_group': 'O-', 'dob': '1985-08-22', 'location_lat': 28.6250, 'location_lng': 77.2000, 'is_eligible': true, 'response_count': 1, 'alert_count': 3, 'response_rate': 0.33, 'consent_given': true},
       {'donor_id': 3, 'firebase_uid': 'mock_uid_donor_3', 'name': 'Priya Patel', 'phone': '+919999999903', 'blood_group': 'A+', 'dob': '1993-11-02', 'location_lat': 28.5400, 'location_lng': 77.3800, 'is_eligible': true, 'response_count': 0, 'alert_count': 2, 'response_rate': 0.0, 'consent_given': true},
@@ -237,7 +237,7 @@ class LocalDatabase {
     await _saveTable('transfusion_records');
 
     // 8. Seed Emergency Events
-    final emergencyEvents = [
+    final List<Map<String, dynamic>> emergencyEvents = [
       {'event_id': 1, 'region_id': 1, 'event_type': 'Seasonal Dengue Outbreak', 'severity': 4, 'event_date': today.subtract(const Duration(days: 2)).toIso8601String().split('T')[0], 'estimated_blood_impact_units': 45.0},
       {'event_id': 2, 'region_id': 2, 'event_type': 'Heavy Monsoon Floods', 'severity': 3, 'event_date': today.subtract(const Duration(days: 10)).toIso8601String().split('T')[0], 'estimated_blood_impact_units': 30.0},
     ];
@@ -274,7 +274,7 @@ class LocalDatabase {
     await _saveTable('bssi_scores');
 
     // 10. Seed critical alerts list
-    final alerts = [
+    final List<Map<String, dynamic>> alerts = [
       {
         'alert_id': 1,
         'bank_id': 2,
@@ -300,7 +300,7 @@ class LocalDatabase {
     await _saveTable('shortage_alerts');
 
     // 11. Seed Donor Alert Logs
-    final logs = [
+    final List<Map<String, dynamic>> logs = [
       {'log_id': 1, 'alert_id': 1, 'donor_id': 1, 'notified_at': today.subtract(const Duration(hours: 4)).toIso8601String(), 'response': 'accepted', 'responded_at': today.subtract(const Duration(hours: 3)).toIso8601String()},
       {'log_id': 2, 'alert_id': 1, 'donor_id': 2, 'notified_at': today.subtract(const Duration(hours: 4)).toIso8601String(), 'response': 'no_response', 'responded_at': null},
     ];
