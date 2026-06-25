@@ -2129,6 +2129,152 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     ];
   }
 
+  List<Map<String, dynamic>> _parseInventoryFromJson(String jsonText, String registeredName) {
+    final List<Map<String, dynamic>> parsedList = [];
+    try {
+      final decoded = json.decode(jsonText);
+      if (decoded is List) {
+        for (var item in decoded) {
+          if (item is Map) {
+            final String? bg = item['blood_group']?.toString();
+            final double? units = double.tryParse(item['units_available']?.toString() ?? item['units']?.toString() ?? '0');
+            final double? expiring = double.tryParse(item['units_expiring_3days']?.toString() ?? '0');
+            if (bg != null && units != null) {
+              parsedList.add({
+                'blood_group': bg,
+                'units': units,
+                'units_expiring_3days': expiring ?? 0.0,
+              });
+            }
+          }
+        }
+      } else if (decoded is Map) {
+        if (decoded['inventory'] is List) {
+          for (var item in decoded['inventory']) {
+            if (item is Map) {
+              final String? bg = item['blood_group']?.toString();
+              final double? units = double.tryParse(item['units_available']?.toString() ?? item['units']?.toString() ?? '0');
+              final double? expiring = double.tryParse(item['units_expiring_3days']?.toString() ?? '0');
+              if (bg != null && units != null) {
+                parsedList.add({
+                  'blood_group': bg,
+                  'units': units,
+                  'units_expiring_3days': expiring ?? 0.0,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Error parsing JSON inventory: $e");
+    }
+    return parsedList;
+  }
+
+  List<String> _splitCsvRow(String row) {
+    final List<String> result = [];
+    bool inQuotes = false;
+    StringBuffer currentToken = StringBuffer();
+
+    for (int i = 0; i < row.length; i++) {
+      final char = row[i];
+      if (char == '"') {
+        inQuotes = !inQuotes;
+      } else if (char == ',' && !inQuotes) {
+        result.add(currentToken.toString().trim().replaceAll('"', ''));
+        currentToken.clear();
+      } else {
+        currentToken.write(char);
+      }
+    }
+    result.add(currentToken.toString().trim().replaceAll('"', ''));
+    return result;
+  }
+
+  List<Map<String, dynamic>> _parseInventoryFromCsv(String csvText, String registeredName) {
+    final List<Map<String, dynamic>> parsedList = [];
+    try {
+      final lines = csvText.split('\n');
+      if (lines.isEmpty) return parsedList;
+
+      final headerLine = lines.first.trim();
+      final headers = _splitCsvRow(headerLine);
+      
+      int bankNameIdx = headers.indexOf('bank_name');
+      int bgIdx = headers.indexOf('blood_group');
+      int unitsIdx = headers.indexOf('units_available');
+      if (unitsIdx == -1) unitsIdx = headers.indexOf('units');
+      int expiringIdx = headers.indexOf('units_expiring_3days');
+
+      if (bgIdx == -1 || unitsIdx == -1) {
+        return parsedList;
+      }
+
+      final Map<String, List<Map<String, dynamic>>> bankGroups = {};
+
+      for (int i = 1; i < lines.length; i++) {
+        final line = lines[i].trim();
+        if (line.isEmpty) continue;
+        
+        final cols = _splitCsvRow(line);
+        if (cols.length <= bgIdx || cols.length <= unitsIdx) continue;
+
+        final String csvBankName = bankNameIdx != -1 && cols.length > bankNameIdx ? cols[bankNameIdx] : "Default Bank";
+        final String bg = cols[bgIdx];
+        final double units = double.tryParse(cols[unitsIdx]) ?? 0.0;
+        final double expiring = expiringIdx != -1 && cols.length > expiringIdx ? (double.tryParse(cols[expiringIdx]) ?? 0.0) : 0.0;
+
+        final entry = {
+          'blood_group': bg,
+          'units': units,
+          'units_expiring_3days': expiring,
+        };
+
+        bankGroups.putIfAbsent(csvBankName, () => []).add(entry);
+      }
+
+      String? bestMatchBankName;
+      for (var name in bankGroups.keys) {
+        if (name.toLowerCase().contains(registeredName.toLowerCase()) || 
+            registeredName.toLowerCase().contains(name.toLowerCase())) {
+          bestMatchBankName = name;
+          break;
+        }
+      }
+
+      if (bestMatchBankName != null) {
+        parsedList.addAll(bankGroups[bestMatchBankName]!);
+        debugPrint("Found matching bank in CSV: $bestMatchBankName");
+      } else if (bankGroups.isNotEmpty) {
+        final firstKey = bankGroups.keys.first;
+        parsedList.addAll(bankGroups[firstKey]!);
+        debugPrint("No matching bank found in CSV. Falling back to first bank: $firstKey");
+      }
+    } catch (e) {
+      debugPrint("Error parsing CSV inventory: $e");
+    }
+    return parsedList;
+  }
+
+  List<Map<String, dynamic>> _parseUploadedInventory(PickedFile file, String registeredName) {
+    try {
+      final decodedBytes = base64.decode(file.base64Content);
+      final plainText = utf8.decode(decodedBytes);
+      
+      if (file.name.toLowerCase().endsWith('.json')) {
+        final parsed = _parseInventoryFromJson(plainText, registeredName);
+        if (parsed.isNotEmpty) return parsed;
+      } else {
+        final parsed = _parseInventoryFromCsv(plainText, registeredName);
+        if (parsed.isNotEmpty) return parsed;
+      }
+    } catch (e) {
+      debugPrint("Error decoding or parsing uploaded database: $e");
+    }
+    return [];
+  }
+
   Future<void> _handleAdminRegister() async {
     if (_adminRegSelectedLocation == null) {
       setState(() => _errorMessage = "Please select an Operating Region.");
@@ -2187,17 +2333,28 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     lat += (0.012 * ((seconds % 4) - 2));
     lng += (0.012 * ((seconds % 3) - 1));
 
-    // Generate mock inventory data (8 standard groups)
-    final List<Map<String, dynamic>> inventoryData = [
-      {'blood_group': 'O+', 'units': 12.5 + _randomJitter(5.0)},
-      {'blood_group': 'O-', 'units': 4.0 + _randomJitter(3.0)},
-      {'blood_group': 'A+', 'units': 15.0 + _randomJitter(5.0)},
-      {'blood_group': 'A-', 'units': 4.5 + _randomJitter(3.0)},
-      {'blood_group': 'B+', 'units': 14.0 + _randomJitter(5.0)},
-      {'blood_group': 'B-', 'units': 6.0 + _randomJitter(3.0)},
-      {'blood_group': 'AB+', 'units': 8.0 + _randomJitter(4.0)},
-      {'blood_group': 'AB-', 'units': 2.0 + _randomJitter(2.0)},
-    ];
+    // Parse uploaded database file if present
+    List<Map<String, dynamic>> inventoryData = [];
+    if (_adminRegSelectedDatabaseFile != null) {
+      inventoryData = _parseUploadedInventory(
+        _adminRegSelectedDatabaseFile!,
+        _adminRegNameController.text.trim(),
+      );
+    }
+
+    // Fallback if parsing failed or was empty
+    if (inventoryData.isEmpty) {
+      inventoryData = [
+        {'blood_group': 'O+', 'units': 12.5 + _randomJitter(5.0), 'units_expiring_3days': 1.0},
+        {'blood_group': 'O-', 'units': 4.0 + _randomJitter(3.0), 'units_expiring_3days': 0.5},
+        {'blood_group': 'A+', 'units': 15.0 + _randomJitter(5.0), 'units_expiring_3days': 1.0},
+        {'blood_group': 'A-', 'units': 4.5 + _randomJitter(3.0), 'units_expiring_3days': 0.5},
+        {'blood_group': 'B+', 'units': 14.0 + _randomJitter(5.0), 'units_expiring_3days': 1.0},
+        {'blood_group': 'B-', 'units': 6.0 + _randomJitter(3.0), 'units_expiring_3days': 0.5},
+        {'blood_group': 'AB+', 'units': 8.0 + _randomJitter(4.0), 'units_expiring_3days': 0.5},
+        {'blood_group': 'AB-', 'units': 2.0 + _randomJitter(2.0), 'units_expiring_3days': 0.2},
+      ];
+    }
 
     try {
       final createdBank = await AuthService.instance.registerBloodBank(

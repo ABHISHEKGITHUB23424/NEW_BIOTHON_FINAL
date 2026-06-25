@@ -118,15 +118,24 @@ class AuthService {
 
     // Seed default inventory rows
     final bloodGroups = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'];
-    final inventoryMap = {for (var item in (inventoryData ?? [])) item['blood_group']: (item['units'] as num).toDouble()};
+    final inventoryMap = {
+      for (var item in (inventoryData ?? [])) 
+        item['blood_group']: {
+          'units': (item['units'] as num).toDouble(),
+          'units_expiring_3days': (item['units_expiring_3days'] as num? ?? 0.0).toDouble()
+        }
+    };
 
     for (var bg in bloodGroups) {
-      final double units = inventoryMap[bg] ?? 0.0;
+      final itemData = inventoryMap[bg];
+      final double units = itemData?['units'] ?? 0.0;
+      final double expiring = itemData?['units_expiring_3days'] ?? 0.0;
+      
       final newInventoryItem = {
         'bank_id': createdBankId,
         'blood_group': bg,
         'units_available': units,
-        'units_expiring_3days': 0.0,
+        'units_expiring_3days': expiring,
         'last_updated': DateTime.now().toIso8601String(),
       };
       await _db.insert('blood_inventory', newInventoryItem, 'inventory_id');
