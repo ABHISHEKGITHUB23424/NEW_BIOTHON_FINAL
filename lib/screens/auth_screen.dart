@@ -7,6 +7,8 @@ import '../main.dart';
 import '../utils/file_picker_helper.dart';
 import '../data/india_locations.dart';
 import '../widgets/location_picker_field.dart';
+import '../services/auth_service.dart';
+import '../data/local_db.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -176,39 +178,20 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     }
 
     final state = Provider.of<AppState>(context, listen: false);
-    final url = Uri.parse('${state.backendUrl}/auth/login');
     
     try {
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'phone': finalPhone,
-          'password': password,
-          'role': role,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final uid = data['profile']['firebase_uid'];
-        final role = data['role'];
-        final profile = Map<String, dynamic>.from(data['profile']);
-        if (role == 'coordinator') {
-          profile['city'] = _searchSelectedLocation!.name;
-        }
-        final token = data['token'] ?? '';
-        await state.login(role, uid, profile, token: token);
-      } else {
-        final errorData = jsonDecode(response.body);
-        setState(() {
-          _errorMessage = _parseErrorDetail(errorData['detail'], fallback: 'Login failed. Please check credentials.');
-          _isVerifying = false;
-        });
+      final res = await AuthService.instance.login(finalPhone, password, role);
+      final uid = res['profile']['firebase_uid'] ?? '';
+      final resRole = res['role'];
+      final profile = Map<String, dynamic>.from(res['profile']);
+      if (resRole == 'coordinator') {
+        profile['city'] = _searchSelectedLocation!.name;
       }
+      final token = res['token'] ?? '';
+      await state.login(resRole, uid, profile, token: token);
     } catch (e) {
       setState(() {
-        _errorMessage = 'Cannot connect to server: $e';
+        _errorMessage = e.toString().replaceAll('Exception: ', '');
         _isVerifying = false;
       });
     }
@@ -260,10 +243,6 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     });
 
     final state = Provider.of<AppState>(context, listen: false);
-    final registerUrl = Uri.parse('${state.backendUrl}/donors/register');
-    final setupUrl = Uri.parse('${state.backendUrl}/auth/profile-setup');
-    
-    final uid = "firebase_uid_${fullPhone.replaceAll('+', '').trim()}";
 
     // Map selected city/region to standard coordinate centers from IndiaLocation list
     final location = _regSelectedLocation!;
@@ -276,71 +255,38 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     lng += (0.015 * ((seconds % 3) - 1));
 
     try {
-      // 1. Register donor in DB
-      final regRes = await http.post(
-        registerUrl,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'firebase_uid': uid,
-          'name': _regNameController.text,
-          'phone': fullPhone,
-          'blood_group': _regSelectedBloodGroup,
-          'dob': _regSelectedDob.toIso8601String().split('T')[0],
-          'location_lat': lat,
-          'location_lng': lng,
-          'password': _regPasswordController.text,
-          'consent_given': _regConsentGiven,
-          'id_document_base64': _selectedIdDocument?.base64Content,
-          'id_document_name': _selectedIdDocument?.name,
-          'fcm_token': 'fcm_token_${fullPhone.replaceAll('+', '').trim()}',
-        }),
+      final created = await AuthService.instance.registerDonor(
+        name: _regNameController.text.trim(),
+        phone: fullPhone,
+        password: _regPasswordController.text,
+        dob: _regSelectedDob.toIso8601String().split('T')[0],
+        lat: lat,
+        lng: lng,
+        consent: _regConsentGiven,
+        idDocBase64: _selectedIdDocument?.base64Content,
+        idDocName: _selectedIdDocument?.name,
       );
 
-      if (regRes.statusCode == 200) {
-        final regData = jsonDecode(regRes.body);
-        final donorId = regData['donor_id'];
-        final token = regData['token'] ?? '';
+      final uid = created['firebase_uid'] ?? '';
+      final profile = {
+        'name': created['name'],
+        'blood_group': _regSelectedBloodGroup,
+        'phone': fullPhone,
+        'city': _regSelectedLocation!.name,
+        'donor_id': created['donor_id'],
+      };
 
-        // 2. Set up Auth Profile mapping
-        final setupRes = await http.post(
-          setupUrl,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'firebase_uid': uid,
-            'role': 'donor',
-            'name': _regNameController.text,
-            'blood_group': _regSelectedBloodGroup,
-            'dob': _regSelectedDob.toIso8601String().split('T')[0],
-            'city': _regSelectedLocation!.name,
-            'phone': fullPhone,
-          }),
-        );
+      await LocalDatabase.instance.update('donors', 'donor_id', created['donor_id'] as int, {
+        'blood_group': _regSelectedBloodGroup,
+      });
 
-        if (setupRes.statusCode == 200) {
-          final profile = {
-            'name': _regNameController.text,
-            'blood_group': _regSelectedBloodGroup,
-            'phone': fullPhone,
-            'city': _regSelectedLocation!.name,
-            'donor_id': donorId,
-          };
-          await state.login('donor', uid, profile, token: token);
-        } else {
-          setState(() {
-            _errorMessage = 'Profile mapping failed.';
-            _isVerifying = false;
-          });
-        }
-      } else {
-        final errorData = jsonDecode(regRes.body);
-        setState(() {
-          _errorMessage = _parseErrorDetail(errorData['detail'], fallback: 'Registration failed. Phone number might be registered.');
-          _isVerifying = false;
-        });
-      }
+      profile['blood_group'] = _regSelectedBloodGroup;
+
+      final token = 'mock_jwt_token_donor_${created['donor_id']}';
+      await state.login('donor', uid, profile, token: token);
     } catch (e) {
       setState(() {
-        _errorMessage = 'Error establishing connection: $e';
+        _errorMessage = e.toString().replaceAll('Exception: ', '');
         _isVerifying = false;
       });
     }
@@ -521,25 +467,30 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Row(
-            children: [
-              const Icon(Icons.favorite, size: 36, color: Color(0xFF8B0000)),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
-                    'BloodSense',
-                    style: TextStyle(fontSize: 22, color: Color(0xFF8B0000), fontWeight: FontWeight.w900, letterSpacing: 0.5),
+          Expanded(
+            child: Row(
+              children: [
+                const Icon(Icons.favorite, size: 36, color: Color(0xFF8B0000)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text(
+                        'BloodSense',
+                        style: TextStyle(fontSize: 22, color: Color(0xFF8B0000), fontWeight: FontWeight.w900, letterSpacing: 0.5),
+                      ),
+                      Text(
+                        'Smart Blood Inventory & Mobilization Network',
+                        style: TextStyle(fontSize: 10, color: Color(0xFF64748B), fontWeight: FontWeight.w600, overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
                   ),
-                  Text(
-                    'Smart Blood Inventory & Mobilization Network',
-                    style: TextStyle(fontSize: 10, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
-                  ),
-                ],
-              ),
-            ],
+                ),
+              ],
+            ),
           ),
+          const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
@@ -2226,21 +2177,11 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     });
 
     final state = Provider.of<AppState>(context, listen: false);
-    final registerUrl = Uri.parse('${state.backendUrl}/banks/register');
 
     // Map selected region to standard coordinate centers from IndiaLocation list
     final location = _adminRegSelectedLocation!;
     double lat = location.latitude;
     double lng = location.longitude;
-
-    int regionId = 1;
-    if (location.name == 'Mumbai MMR') {
-      regionId = 2;
-    } else if (location.name == 'Bengaluru Urban') {
-      regionId = 3;
-    } else if (location.name == 'Chennai') {
-      regionId = 4;
-    }
 
     final seconds = DateTime.now().second;
     lat += (0.012 * ((seconds % 4) - 2));
@@ -2258,91 +2199,35 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
       {'blood_group': 'AB-', 'units': 2.0 + _randomJitter(2.0)},
     ];
 
-    // Generate mock historical data (300 days of daily records)
-    final List<Map<String, dynamic>> donations = [];
-    final List<Map<String, dynamic>> transfusions = [];
-    final today = DateTime.now();
-
-    final bloodGroups = ["O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-"];
-
-    for (int i = 300; i >= 1; i--) {
-      final date = today.subtract(Duration(days: i));
-      final dateStr = date.toIso8601String().split('T')[0];
-
-      for (final bg in bloodGroups) {
-        final isCriticalGroup = (bg == 'O+' || bg == 'O-');
-        
-        double donUnits = (seconds % 3 == 0) ? (1.0 + (seconds % 3)) : 0.0;
-        if (donUnits > 0) {
-          donations.add({
-            'date': dateStr,
-            'blood_group': bg,
-            'units': donUnits,
-          });
-        }
-
-        double transUnits = 0.0;
-        if (isCriticalGroup) {
-          transUnits = (seconds % 4 == 0) ? (2.0 + (seconds % 4)) : 1.0;
-        } else {
-          transUnits = (seconds % 5 == 0) ? (1.0 + (seconds % 2)) : 0.0;
-        }
-
-        if (transUnits > 0) {
-          transfusions.add({
-            'date': dateStr,
-            'blood_group': bg,
-            'units': transUnits,
-            'emergency': isCriticalGroup && (seconds % 6 == 0),
-          });
-        }
-      }
-    }
-
-    final Map<String, dynamic> historicalData = {
-      'donations': donations,
-      'transfusions': transfusions,
-    };
-
     try {
-      final response = await http.post(
-        registerUrl,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'name': _adminRegNameController.text,
-          'phone': fullPhone,
-          'password': _adminRegPasswordController.text,
-          'address': _adminRegAddressController.text,
-          'establishment_date': _adminRegSelectedEstDate.toIso8601String().split('T')[0],
-          'website_link': _adminRegWebsiteController.text,
-          'approval_document_base64': _adminRegSelectedDoc?.base64Content,
-          'approval_document_name': _adminRegSelectedDoc?.name,
-          'location_lat': lat,
-          'location_lng': lng,
-          'region_name': _adminRegSelectedLocation!.name,
-          'inventory_data': inventoryData,
-          'historical_data': historicalData,
-        }),
+      final createdBank = await AuthService.instance.registerBloodBank(
+        name: _adminRegNameController.text.trim(),
+        phone: fullPhone,
+        password: _adminRegPasswordController.text,
+        address: _adminRegAddressController.text.trim(),
+        estDate: _adminRegSelectedEstDate.toIso8601String().split('T')[0],
+        lat: lat,
+        lng: lng,
+        regionName: _adminRegSelectedLocation!.name,
+        website: _adminRegWebsiteController.text.trim(),
+        approvalDocBase64: _adminRegSelectedDoc?.base64Content,
+        approvalDocName: _adminRegSelectedDoc?.name,
+        inventoryData: inventoryData,
       );
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final uid = data['profile']['firebase_uid'];
-        final role = data['role'] ?? 'bank_admin';
-        final profile = data['profile'];
-        final token = data['token'] ?? '';
-        
-        await state.login(role, uid, profile, token: token);
-      } else {
-        final errorData = jsonDecode(response.body);
-        setState(() {
-          _errorMessage = _parseErrorDetail(errorData['detail'], fallback: 'Registration failed.');
-          _isVerifying = false;
-        });
-      }
+      final uid = createdBank['admin_user_id'];
+      final profile = {
+        'name': createdBank['name'],
+        'contact_phone': createdBank['contact_phone'],
+        'address': createdBank['address'],
+        'bank_id': createdBank['bank_id'],
+        'city': _adminRegSelectedLocation!.name,
+      };
+      final token = 'mock_jwt_token_bank_${createdBank['bank_id']}';
+      await state.login('bank_admin', uid, profile, token: token);
     } catch (e) {
       setState(() {
-        _errorMessage = 'Error establishing connection: $e';
+        _errorMessage = e.toString().replaceAll('Exception: ', '');
         _isVerifying = false;
       });
     }

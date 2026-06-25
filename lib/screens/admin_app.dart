@@ -3,9 +3,13 @@ import 'package:provider/provider.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../main.dart';
+import '../data/local_db.dart';
+import '../services/bssi_service.dart';
+import '../services/redistribution_service.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({super.key});
@@ -38,38 +42,38 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     setState(() => _isLoading = true);
     
     try {
-      // 1. Fetch Inventory Stock
-      final invRes = await http.get(
-        Uri.parse('${state.backendUrl}/inventory/${state.bankId}'),
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
-      // 2. Fetch BSSI Scores
-      final bssiRes = await http.get(
-        Uri.parse('${state.backendUrl}/bssi/${state.bankId}'),
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
-      // 3. Fetch Alert History
-      final alertRes = await http.get(
-        Uri.parse('${state.backendUrl}/alerts/history/${state.bankId}'),
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
+      await LocalDatabase.instance.init();
       
-      if (invRes.statusCode == 200 && bssiRes.statusCode == 200) {
-        final Map<String, dynamic> invData = jsonDecode(invRes.body);
-        final Map<String, dynamic> bssiData = jsonDecode(bssiRes.body);
-        
-        setState(() {
-          _inventory = invData;
-          _bssiScores = bssiData.map((key, value) => MapEntry(key, (value as num).toDouble()));
-          if (alertRes.statusCode == 200) {
-            _alertHistory = jsonDecode(alertRes.body);
-          }
-          _applyActiveSort();
-          _isLoading = false;
-        });
-      } else {
-        setState(() => _isLoading = false);
+      // Calculate/Update BSSI Composite scores first
+      await BssiService.instance.updateAllBssiScores();
+
+      // 1. Get Local Inventory Stock
+      final invTable = LocalDatabase.instance.getTable('blood_inventory').where((i) => i['bank_id'] == state.bankId).toList();
+      final Map<String, dynamic> invMap = {};
+      for (var row in invTable) {
+        invMap[row['blood_group']] = {
+          'units_available': (row['units_available'] as num).toDouble(),
+          'units_expiring_3days': (row['units_expiring_3days'] as num).toDouble(),
+        };
       }
+
+      // 2. Get Local BSSI Scores
+      final bssiTable = LocalDatabase.instance.getTable('bssi_scores').where((s) => s['bank_id'] == state.bankId).toList();
+      final Map<String, double> bssiMap = {};
+      for (var row in bssiTable) {
+        bssiMap[row['blood_group']] = (row['score'] as num).toDouble();
+      }
+
+      // 3. Get Local Alert History
+      final alertsTable = LocalDatabase.instance.getTable('shortage_alerts').where((a) => a['bank_id'] == state.bankId).toList();
+
+      setState(() {
+        _inventory = invMap;
+        _bssiScores = bssiMap;
+        _alertHistory = alertsTable;
+        _applyActiveSort();
+        _isLoading = false;
+      });
     } catch (e) {
       setState(() => _isLoading = false);
       print("Error refreshing admin dashboard: $e");
@@ -699,23 +703,28 @@ class _BloodGroupDetailScreenState extends State<BloodGroupDetailScreen> {
   }
 
   Future<void> _fetchDetails() async {
-    final state = Provider.of<AppState>(context, listen: false);
-    
     try {
-      // 1. Fetch Forecast Cache
-      final fRes = await http.get(Uri.parse('${state.backendUrl}/forecast/${widget.bankId}/${widget.bloodGroup}'));
-      // 2. Fetch BSSI detail
-      final bRes = await http.get(Uri.parse('${state.backendUrl}/bssi/${widget.bankId}/${widget.bloodGroup}'));
-      
-      if (fRes.statusCode == 200 && bRes.statusCode == 200) {
-        setState(() {
-          _forecasts = jsonDecode(fRes.body);
-          _bssiFactors = jsonDecode(bRes.body)['factors'] ?? {};
-          _isLoading = false;
-        });
-      } else {
-        setState(() => _isLoading = false);
-      }
+      await LocalDatabase.instance.init();
+
+      // 1. Get Forecast Cache
+      final forecastsTable = LocalDatabase.instance.getTable('forecast_cache')
+          .where((f) => f['bank_id'] == widget.bankId && f['blood_group'] == widget.bloodGroup)
+          .toList();
+      final List<Map<String, dynamic>> fList = forecastsTable.map((f) => {
+        'date': f['forecast_date'],
+        'yhat': (f['yhat'] as num).toDouble(),
+        'yhat_lower': (f['yhat_lower'] as num).toDouble(),
+        'yhat_upper': (f['yhat_upper'] as num).toDouble(),
+      }).toList();
+
+      // 2. Compute BSSI detail locally
+      final bssiDetail = await BssiService.instance.computeBssi(widget.bankId, widget.bloodGroup);
+
+      setState(() {
+        _forecasts = fList;
+        _bssiFactors = bssiDetail['factors'] ?? {};
+        _isLoading = false;
+      });
     } catch (e) {
       setState(() => _isLoading = false);
       print("Error loading blood group detail: $e");
@@ -736,50 +745,21 @@ class _BloodGroupDetailScreenState extends State<BloodGroupDetailScreen> {
         onScanComplete: (locationData) async {
           setState(() => _isTriggering = true);
           
-          final url = Uri.parse('${state.backendUrl}/alerts/trigger/${widget.bankId}/${widget.bloodGroup}');
-          
           try {
-            final response = await http.post(
-              url,
-              headers: {'Authorization': 'Bearer ${state.token}'},
-            );
+            // Log local shortage alert trigger
+            final newAlert = {
+              'bank_id': widget.bankId,
+              'blood_group': widget.bloodGroup,
+              'bssi_at_trigger': widget.bssiScore,
+              'donors_notified': 300,
+              'donors_responded': 0,
+              'response_rate': 0.0,
+              'triggered_at': DateTime.now().toIso8601String(),
+            };
+            await LocalDatabase.instance.insert('shortage_alerts', newAlert, 'alert_id');
             
-            if (response.statusCode == 200) {
-              final data = jsonDecode(response.body);
-              
-              setState(() => _isTriggering = false);
-              
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  backgroundColor: const Color(0xFF30D158),
-                  content: Text('Alert triggered! 300 eligible donors notified in and around ${locationData['place']}.'),
-                ),
-              );
-              
-              final mockNotif = {
-                'log_id': 999,
-                'bank_name': state.name,
-                'distance_km': 0.8,
-                'eta_minutes': 3,
-                'blood_group': widget.bloodGroup,
-                'bssi': widget.bssiScore,
-                'bank_lat': locationData['lat'],
-                'bank_lng': locationData['lng'],
-                'user_start_lat': locationData['user_start_lat'],
-                'user_start_lng': locationData['user_start_lng'],
-                'message': 'CRITICAL SHORTAGE: ${widget.bloodGroup} needed at ${state.name} immediately!'
-              };
-              
-              state.triggerMockNotification(mockNotif);
-              
-            } else {
-              setState(() => _isTriggering = false);
-            }
-          } catch (e) {
             setState(() => _isTriggering = false);
-            print("Error triggering alert: $e");
             
-            // Fallback for offline demo mode
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 backgroundColor: const Color(0xFF30D158),
@@ -800,7 +780,11 @@ class _BloodGroupDetailScreenState extends State<BloodGroupDetailScreen> {
               'user_start_lng': locationData['user_start_lng'],
               'message': 'CRITICAL SHORTAGE: ${widget.bloodGroup} needed at ${state.name} immediately!'
             };
+            
             state.triggerMockNotification(mockNotif);
+          } catch (e) {
+            setState(() => _isTriggering = false);
+            print("Error triggering alert: $e");
           }
         },
       ),
@@ -1067,17 +1051,11 @@ class _RedistributionSuggestionCardState extends State<RedistributionSuggestionC
 
   Future<void> _fetchSuggestions() async {
     try {
-      final response = await http.get(
-        Uri.parse('${widget.backendUrl}/redistribution/suggest/${widget.bankId}/${widget.bloodGroup}')
-      );
-      if (response.statusCode == 200) {
-        setState(() {
-          _suggestions = jsonDecode(response.body);
-          _isLoading = false;
-        });
-      } else {
-        setState(() => _isLoading = false);
-      }
+      final suggestions = await RedistributionService.instance.getRedistributionSuggestions(widget.bankId, widget.bloodGroup);
+      setState(() {
+        _suggestions = suggestions;
+        _isLoading = false;
+      });
     } catch (e) {
       setState(() => _isLoading = false);
       print("Error fetching redistribution suggestions: $e");
@@ -1086,30 +1064,20 @@ class _RedistributionSuggestionCardState extends State<RedistributionSuggestionC
 
   Future<void> _requestTransfer(Map suggestion) async {
     try {
-      final state = Provider.of<AppState>(context, listen: false);
-      final response = await http.post(
-        Uri.parse('${widget.backendUrl}/redistribution/request'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${state.token}',
-        },
-        body: jsonEncode({
-          'requesting_bank_id': widget.bankId,
-          'supplying_bank_id': suggestion['supplying_bank_id'],
-          'blood_group': widget.bloodGroup,
-          'suggested_units': suggestion['suggested_units'],
-        }),
+      await RedistributionService.instance.createRedistributionRequest(
+        requestingBankId: widget.bankId,
+        supplyingBankId: suggestion['supplying_bank_id'] as int,
+        bloodGroup: widget.bloodGroup,
+        suggestedUnits: (suggestion['suggested_units'] as num).toDouble(),
       );
 
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: const Color(0xFF30D158),
-            content: Text('Redistribution transfer request sent to ${suggestion['supplying_bank_name']}!'),
-          ),
-        );
-        _fetchSuggestions();
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: const Color(0xFF30D158),
+          content: Text('Redistribution transfer request sent to ${suggestion['supplying_bank_name']}!'),
+        ),
+      );
+      _fetchSuggestions();
     } catch (e) {
       print("Error request transfer: $e");
     }
@@ -1251,49 +1219,71 @@ class _LogInventoryTransactionFormState extends State<LogInventoryTransactionFor
     }
     
     setState(() => _isSaving = true);
-    
-    final payload = {
-      'bank_id': widget.bankId,
-      'blood_group': _selectedBloodGroup,
-      'transaction_type': _transactionType,
-      'units': units,
-      'donor_id': _transactionType == 'donation' && _donorController.text.isNotEmpty 
-          ? int.tryParse(_donorController.text) 
-          : null,
-      'hospital_id': _transactionType == 'transfusion' && _hospitalController.text.isNotEmpty 
-          ? int.tryParse(_hospitalController.text) 
-          : null,
-      'emergency_flag': _emergencyFlag,
-    };
 
     try {
-      final state = Provider.of<AppState>(context, listen: false);
-      final response = await http.post(
-        Uri.parse('${widget.backendUrl}/inventory/update'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${state.token}',
-        },
-        body: jsonEncode(payload),
+      await LocalDatabase.instance.init();
+
+      final invTable = LocalDatabase.instance.getTable('blood_inventory');
+      final invRow = invTable.firstWhere(
+        (i) => i['bank_id'] == widget.bankId && i['blood_group'] == _selectedBloodGroup,
+        orElse: () => {},
       );
 
-      setState(() => _isSaving = false);
-      
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(backgroundColor: Color(0xFF30D158), content: Text('Inventory record logged successfully!')),
+      if (invRow.isNotEmpty) {
+        final double currentUnits = (invRow['units_available'] as num).toDouble();
+        final double newUnits = _transactionType == 'donation' 
+            ? currentUnits + units 
+            : max(0.0, currentUnits - units);
+        
+        await LocalDatabase.instance.update(
+          'blood_inventory', 
+          'inventory_id', 
+          invRow['inventory_id'] as int, 
+          {
+            'units_available': newUnits,
+            'last_updated': DateTime.now().toIso8601String(),
+          }
         );
-        _unitsController.clear();
-        _donorController.clear();
-        _hospitalController.clear();
-        widget.onCompleted();
-      } else {
-        final err = jsonDecode(response.body)['detail'] ?? 'Could not log record';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+        
+        // Log to history
+        if (_transactionType == 'donation') {
+          final newDonation = {
+            'donor_id': int.tryParse(_donorController.text) ?? 1,
+            'bank_id': widget.bankId,
+            'blood_group': _selectedBloodGroup,
+            'units': units,
+            'donated_at': DateTime.now().toIso8601String().split('T')[0],
+            'is_festival_day': false,
+            'accident_count_that_day': 0,
+            'season': 'Winter',
+          };
+          await LocalDatabase.instance.insert('donation_records', newDonation, 'record_id');
+        } else {
+          final newTransfusion = {
+            'hospital_id': int.tryParse(_hospitalController.text) ?? 1,
+            'blood_group': _selectedBloodGroup,
+            'units': units,
+            'transfused_at': DateTime.now().toIso8601String().split('T')[0],
+            'emergency_flag': _emergencyFlag,
+          };
+          await LocalDatabase.instance.insert('transfusion_records', newTransfusion, 'record_id');
+        }
+        
+        // Recompute BSSI score immediately
+        await BssiService.instance.computeBssi(widget.bankId, _selectedBloodGroup);
       }
+
+      setState(() => _isSaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(backgroundColor: Color(0xFF30D158), content: Text('Inventory record logged successfully!')),
+      );
+      _unitsController.clear();
+      _donorController.clear();
+      _hospitalController.clear();
+      widget.onCompleted();
     } catch (e) {
       setState(() => _isSaving = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error connecting to backend: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error updating inventory locally: $e')));
     }
   }
 

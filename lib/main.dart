@@ -5,6 +5,8 @@ import 'screens/auth_screen.dart';
 import 'screens/donor_app.dart';
 import 'screens/admin_app.dart';
 import 'screens/coordinator_app.dart';
+import 'data/local_db.dart';
+import 'services/forecasting_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -163,6 +165,14 @@ class AppState extends ChangeNotifier {
     _donorId = prefs.getInt('donorId');
     _bankId = prefs.getInt('bankId');
     _token = prefs.getString('token') ?? '';
+    
+    try {
+      await LocalDatabase.instance.init();
+      await ForecastingService.instance.trainAndCacheForecasts();
+    } catch (e) {
+      debugPrint('Error initializing local database/forecasting on loadSession: $e');
+    }
+    
     _isLoading = false;
     notifyListeners();
   }

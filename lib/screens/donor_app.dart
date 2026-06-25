@@ -8,8 +8,11 @@ import 'dart:ui_web' as ui_web;
 import 'dart:html' as html;
 import 'package:intl/intl.dart';
 import 'dart:async';
+import 'dart:math';
 import '../main.dart';
 import '../utils/geolocation_helper.dart';
+import '../data/local_db.dart';
+import '../services/bssi_service.dart';
 
 class DonorHomeScreen extends StatefulWidget {
   const DonorHomeScreen({super.key});
@@ -71,27 +74,30 @@ class _DonorHomeScreenState extends State<DonorHomeScreen> {
     Future.delayed(Duration(seconds: _currentPollIntervalSeconds), _pollTick);
   }
 
+  Future<_GPSCoords?> _getCurrentCoordinatesFallback() async {
+    final coords = await GeolocationHelper.getCurrentLocation();
+    if (coords != null) return _GPSCoords(coords.latitude, coords.longitude);
+    return null;
+  }
+
   Future<void> _syncGpsAndFetchAlerts() async {
     final state = Provider.of<AppState>(context, listen: false);
     if (state.donorId == null || state.firebaseUid == null) return;
 
     // 1. Geolocation Sync
-    final coords = await GeolocationHelper.getCurrentLocation();
+    final coords = await _getCurrentCoordinatesFallback();
     if (coords != null) {
       print("Live Browser GPS Coordinates: Lat=${coords.latitude}, Lng=${coords.longitude}");
-      final url = Uri.parse('${state.backendUrl}/donors/update-location');
       try {
-        await http.put(
-          url,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ${state.token}',
-          },
-          body: jsonEncode({
-            'firebase_uid': state.firebaseUid,
+        await LocalDatabase.instance.init();
+        await LocalDatabase.instance.update(
+          'donors', 
+          'donor_id', 
+          state.donorId!, 
+          {
             'location_lat': coords.latitude,
             'location_lng': coords.longitude,
-          }),
+          }
         );
       } catch (e) {
         print("Error updating live location: $e");
@@ -105,66 +111,106 @@ class _DonorHomeScreenState extends State<DonorHomeScreen> {
     if (_dashboardData != null) {
       final cautionLevel = _dashboardData!['caution_level'];
       if ((cautionLevel == 'CRITICAL' || cautionLevel == 'WARNING') && state.pendingNotification == null) {
-        final alertUrl = Uri.parse('${state.backendUrl}/donors/nearest-shortage-alert/${state.donorId}');
         try {
-          final response = await http.get(
-            alertUrl,
-            headers: {'Authorization': 'Bearer ${state.token}'},
-          );
-          if (response.statusCode == 200) {
-            final alertData = jsonDecode(response.body);
-            state.triggerMockNotification(alertData);
+          final donorRows = LocalDatabase.instance.getTable('donors').where((d) => d['donor_id'] == state.donorId).toList();
+          if (donorRows.isEmpty) return;
+          final donor = donorRows.first;
+          final String bg = donor['blood_group'];
+          
+          final alerts = LocalDatabase.instance.getTable('shortage_alerts')
+              .where((a) => a['blood_group'] == bg)
+              .toList();
+          
+          if (alerts.isNotEmpty) {
+            alerts.sort((a, b) => (b['triggered_at'] as String).compareTo(a['triggered_at'] as String));
+            final latestAlert = alerts.first;
+            final int bankId = latestAlert['bank_id'] as int;
+            
+            final bank = LocalDatabase.instance.getTable('blood_banks').firstWhere((b) => b['bank_id'] == bankId);
+            
+            final double donorLat = (donor['location_lat'] as num).toDouble();
+            final double donorLng = (donor['location_lng'] as num).toDouble();
+            final double bankLat = (bank['location_lat'] as num).toDouble();
+            final double bankLng = (bank['location_lng'] as num).toDouble();
+            final double dist = BssiService.instance.calculateDistance(donorLat, donorLng, bankLat, bankLng);
+            final int eta = (dist * 2).toInt() + 5;
+            
+            final alertPayload = {
+              'log_id': 999,
+              'alert_id': latestAlert['alert_id'],
+              'bank_name': bank['name'],
+              'bank_address': bank['address'],
+              'blood_group': bg,
+              'bssi': latestAlert['bssi_at_trigger'],
+              'distance_km': double.parse(dist.toStringAsFixed(2)),
+              'eta_minutes': eta,
+              'bank_lat': bankLat,
+              'bank_lng': bankLng,
+              'user_start_lat': donorLat,
+              'user_start_lng': donorLng,
+              'message': 'CRITICAL SHORTAGE: ${bg} needed at ${bank['name']} immediately!'
+            };
+            state.triggerMockNotification(alertPayload);
           }
         } catch (e) {
-          print("Error auto-fetching nearest shortage alert: $e");
+          print("Error auto-matching nearest shortage: $e");
         }
       }
     }
   }
+
 
   Future<void> _fetchDonorData() async {
     final state = Provider.of<AppState>(context, listen: false);
     if (state.donorId == null) return;
     
     setState(() => _isLoading = true);
-    final url = Uri.parse('${state.backendUrl}/donors/history/${state.donorId}');
     
     try {
-      final response = await http.get(
-        url,
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
-      if (response.statusCode == 200) {
-        final List history = jsonDecode(response.body);
-        
-        // Calculate eligibility
-        bool isEligible = true;
-        int eligibleInDays = 0;
-        DateTime? lastDonation;
-        
-        if (history.isNotEmpty) {
-          final lastDateStr = history.first['donated_at'];
-          lastDonation = DateTime.parse(lastDateStr);
-          final daysSince = DateTime.now().difference(lastDonation).inDays;
-          if (daysSince < 90) {
-            isEligible = false;
-            eligibleInDays = 90 - daysSince;
-          }
-        }
-        
-        setState(() {
-          _donorStats = {
-            'eligibility_status': isEligible,
-            'eligible_in_days': eligibleInDays,
-            'last_donation_date': lastDonation,
-            'total_donations': history.length,
-            'donations_history': history,
-          };
-          _isLoading = false;
+      await LocalDatabase.instance.init();
+      final donationRecords = LocalDatabase.instance.getTable('donation_records')
+          .where((d) => d['donor_id'] == state.donorId)
+          .toList();
+      
+      final List<Map<String, dynamic>> history = [];
+      final banks = LocalDatabase.instance.getTable('blood_banks');
+      for (var rec in donationRecords) {
+        final bank = banks.firstWhere((b) => b['bank_id'] == rec['bank_id'], orElse: () => {});
+        history.add({
+          'record_id': rec['record_id'],
+          'donated_at': rec['donated_at'],
+          'units': (rec['units'] as num).toDouble(),
+          'blood_group': rec['blood_group'],
+          'bank_name': bank.isNotEmpty ? bank['name'] : 'Local Blood Bank',
         });
-      } else {
-        setState(() => _isLoading = false);
       }
+      history.sort((a, b) => (b['donated_at'] as String).compareTo(a['donated_at'] as String));
+      
+      // Calculate eligibility
+      bool isEligible = true;
+      int eligibleInDays = 0;
+      DateTime? lastDonation;
+      
+      if (history.isNotEmpty) {
+        final lastDateStr = history.first['donated_at'];
+        lastDonation = DateTime.parse(lastDateStr);
+        final daysSince = DateTime.now().difference(lastDonation).inDays;
+        if (daysSince < 90) {
+          isEligible = false;
+          eligibleInDays = 90 - daysSince;
+        }
+      }
+      
+      setState(() {
+        _donorStats = {
+          'eligibility_status': isEligible,
+          'eligible_in_days': eligibleInDays,
+          'last_donation_date': lastDonation,
+          'total_donations': history.length,
+          'donations_history': history,
+        };
+        _isLoading = false;
+      });
     } catch (e) {
       setState(() => _isLoading = false);
       print("Error loading donor data: $e");
@@ -175,17 +221,73 @@ class _DonorHomeScreenState extends State<DonorHomeScreen> {
     final state = Provider.of<AppState>(context, listen: false);
     if (state.donorId == null) return;
     
-    final url = Uri.parse('${state.backendUrl}/donors/${state.donorId}/dashboard-data');
     try {
-      final response = await http.get(
-        url,
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
-      if (response.statusCode == 200) {
-        setState(() {
-          _dashboardData = jsonDecode(response.body);
+      await LocalDatabase.instance.init();
+      
+      final donorRows = LocalDatabase.instance.getTable('donors').where((d) => d['donor_id'] == state.donorId).toList();
+      if (donorRows.isEmpty) return;
+      final donor = donorRows.first;
+      final String bg = donor['blood_group'];
+      final double donorLat = (donor['location_lat'] as num).toDouble();
+      final double donorLng = (donor['location_lng'] as num).toDouble();
+      
+      await BssiService.instance.updateAllBssiScores();
+      
+      final allBanks = LocalDatabase.instance.getTable('blood_banks');
+      final allBssi = LocalDatabase.instance.getTable('bssi_scores');
+      final allInv = LocalDatabase.instance.getTable('blood_inventory');
+      
+      final List<Map<String, dynamic>> banksList = [];
+      double highestBssi = 0.0;
+      
+      for (var bank in allBanks) {
+        final int bId = bank['bank_id'] as int;
+        final bssiRow = allBssi.firstWhere((s) => s['bank_id'] == bId && s['blood_group'] == bg, orElse: () => {});
+        final double bssi = bssiRow.isNotEmpty ? (bssiRow['score'] as num).toDouble() : 20.0;
+        
+        if (bssi > highestBssi) highestBssi = bssi;
+        
+        final invRow = allInv.firstWhere((i) => i['bank_id'] == bId && i['blood_group'] == bg, orElse: () => {});
+        final double units = invRow.isNotEmpty ? (invRow['units_available'] as num).toDouble() : 0.0;
+        
+        final double dist = BssiService.instance.calculateDistance(donorLat, donorLng, (bank['location_lat'] as num).toDouble(), (bank['location_lng'] as num).toDouble());
+        final int eta = (dist * 2).toInt() + 5;
+        
+        banksList.add({
+          'bank_id': bId,
+          'bank_name': bank['name'],
+          'address': bank['address'],
+          'bssi': bssi,
+          'units_available': units,
+          'distance_km': double.parse(dist.toStringAsFixed(2)),
+          'eta_minutes': eta,
+          'phone': bank['contact_phone'],
+          'location_lat': (bank['location_lat'] as num).toDouble(),
+          'location_lng': (bank['location_lng'] as num).toDouble(),
         });
       }
+      
+      banksList.sort((a, b) => (a['distance_km'] as num).compareTo(b['distance_km'] as num));
+      
+      String cautionLevel = 'NORMAL';
+      String cautionMessage = 'Blood levels for ${bg} are currently stable in your area. Keep monitoring.';
+      if (highestBssi > 75.0) {
+        cautionLevel = 'CRITICAL';
+        cautionMessage = 'CRITICAL shortage of ${bg} detected in your region! Immediate donations needed.';
+      } else if (highestBssi > 55.0) {
+        cautionLevel = 'WARNING';
+        cautionMessage = 'Warning: Stock levels of ${bg} are falling. Consider scheduling a donation soon.';
+      }
+      
+      setState(() {
+        _dashboardData = {
+          'caution_level': cautionLevel,
+          'caution_message': cautionMessage,
+          'banks': banksList.take(5).toList(),
+          'dob': donor['dob'],
+          'id_document_name': donor['id_document_name'],
+        };
+      });
     } catch (e) {
       print("Error fetching donor dashboard data: $e");
     }
@@ -195,78 +297,114 @@ class _DonorHomeScreenState extends State<DonorHomeScreen> {
     final state = Provider.of<AppState>(context, listen: false);
     setState(() => _isLoading = true);
     
-    final triggerUrl = Uri.parse('${state.backendUrl}/alerts/trigger/${bank['bank_id']}/${state.bloodGroup}');
     try {
-      final res = await http.post(triggerUrl);
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        if (data['status'] == 'success' && data['notifications'] != null && data['notifications'].isNotEmpty) {
-          final myNotifLog = data['notifications'].first;
-          final mockNotif = {
-            'log_id': myNotifLog['log_id'],
-            'alert_id': data['alert_id'],
-            'bank_name': bank['bank_name'],
-            'bank_address': bank['address'],
-            'blood_group': state.bloodGroup,
-            'bssi': bank['bssi'],
-            'distance_km': bank['distance_km'],
-            'eta_minutes': bank['eta_minutes'],
-            'phone': bank['phone'],
-          };
-          setState(() => _isLoading = false);
-          state.triggerMockNotification(mockNotif);
-        } else {
-          _triggerFallbackAlert(bank, state);
-        }
-      } else {
-        _triggerFallbackAlert(bank, state);
-      }
-    } catch (e) {
-      _triggerFallbackAlert(bank, state);
-    }
-  }
+      await LocalDatabase.instance.init();
+      
+      final int bId = bank['bank_id'] as int;
+      final newAlert = {
+        'bank_id': bId,
+        'blood_group': state.bloodGroup,
+        'bssi_at_trigger': bank['bssi'],
+        'donors_notified': 300,
+        'donors_responded': 0,
+        'response_rate': 0.0,
+        'triggered_at': DateTime.now().toIso8601String(),
+      };
+      await LocalDatabase.instance.insert('shortage_alerts', newAlert, 'alert_id');
 
-  void _triggerFallbackAlert(Map<String, dynamic> bank, AppState state) {
-    final mockNotif = {
-      'log_id': 999,
-      'alert_id': 999,
-      'bank_name': bank['bank_name'],
-      'bank_address': bank['address'],
-      'blood_group': state.bloodGroup,
-      'bssi': bank['bssi'],
-      'distance_km': bank['distance_km'],
-      'eta_minutes': bank['eta_minutes'],
-      'phone': bank['phone'] ?? '+919999000000',
-    };
-    setState(() => _isLoading = false);
-    state.triggerMockNotification(mockNotif);
+      final donorRows = LocalDatabase.instance.getTable('donors').where((d) => d['donor_id'] == state.donorId).toList();
+      final double userLat = donorRows.isNotEmpty ? (donorRows.first['location_lat'] as num).toDouble() : 13.0494;
+      final double userLng = donorRows.isNotEmpty ? (donorRows.first['location_lng'] as num).toDouble() : 80.2104;
+      
+      final mockNotif = {
+        'log_id': 999,
+        'alert_id': 999,
+        'bank_name': bank['bank_name'],
+        'bank_address': bank['address'],
+        'blood_group': state.bloodGroup,
+        'bssi': bank['bssi'],
+        'distance_km': bank['distance_km'],
+        'eta_minutes': bank['eta_minutes'],
+        'phone': bank['phone'] ?? '+919999000000',
+        'bank_lat': bank['location_lat'],
+        'bank_lng': bank['location_lng'],
+        'user_start_lat': userLat,
+        'user_start_lng': userLng,
+      };
+      setState(() => _isLoading = false);
+      state.triggerMockNotification(mockNotif);
+    } catch (e) {
+      setState(() => _isLoading = false);
+      print("Error triggering mock mobilization: $e");
+    }
   }
 
   Future<void> _simulateMockPushNotification(AppState state) async {
     if (state.donorId == null) return;
     setState(() => _isLoading = true);
     
-    final url = Uri.parse('${state.backendUrl}/donors/nearest-shortage-alert/${state.donorId}');
     try {
-      final response = await http.get(
-        url,
-        headers: {'Authorization': 'Bearer ${state.token}'},
-      );
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      await LocalDatabase.instance.init();
+      
+      final donorRows = LocalDatabase.instance.getTable('donors').where((d) => d['donor_id'] == state.donorId).toList();
+      if (donorRows.isEmpty) {
         setState(() => _isLoading = false);
-        state.triggerMockNotification(data);
+        return;
+      }
+      
+      final donor = donorRows.first;
+      final String bg = donor['blood_group'];
+      final double donorLat = (donor['location_lat'] as num).toDouble();
+      final double donorLng = (donor['location_lng'] as num).toDouble();
+      
+      final allBanks = LocalDatabase.instance.getTable('blood_banks');
+      double minDistance = double.infinity;
+      Map<String, dynamic>? closestBank;
+      
+      for (var bank in allBanks) {
+        final double dist = BssiService.instance.calculateDistance(
+          donorLat,
+          donorLng,
+          (bank['location_lat'] as num).toDouble(),
+          (bank['location_lng'] as num).toDouble(),
+        );
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestBank = bank;
+        }
+      }
+      
+      if (closestBank != null) {
+        final int bId = closestBank['bank_id'] as int;
+        final bssiRows = LocalDatabase.instance.getTable('bssi_scores')
+            .where((s) => s['bank_id'] == bId && s['blood_group'] == bg)
+            .toList();
+        final double bssi = bssiRows.isNotEmpty ? (bssiRows.first['score'] as num).toDouble() : 80.0;
+        final int eta = (minDistance * 2).toInt() + 5;
+        
+        final mockNotif = {
+          'log_id': 999,
+          'alert_id': 999,
+          'bank_name': closestBank['name'],
+          'bank_address': closestBank['address'],
+          'blood_group': bg,
+          'bssi': bssi,
+          'distance_km': double.parse(minDistance.toStringAsFixed(2)),
+          'eta_minutes': eta,
+          'phone': closestBank['contact_phone'] ?? '+919999000000',
+          'bank_lat': closestBank['location_lat'],
+          'bank_lng': closestBank['location_lng'],
+          'user_start_lat': donorLat,
+          'user_start_lng': donorLng,
+        };
+        setState(() => _isLoading = false);
+        state.triggerMockNotification(mockNotif);
       } else {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to trigger mock notification from server.')),
-        );
       }
     } catch (e) {
       setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Connection error: $e')),
-      );
+      print("Error simulating mock push notification: $e");
     }
   }
 
@@ -1007,43 +1145,17 @@ class _AlertReceivedScreenState extends State<AlertReceivedScreen> {
 
   Future<void> _respondToAlert(String responseType) async {
     setState(() => _isActioning = true);
-    
     final state = Provider.of<AppState>(context, listen: false);
-    final url = Uri.parse('${state.backendUrl}/alerts/respond');
     
     try {
-      final response = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${state.token}',
-        },
-        body: jsonEncode({
-          'log_id': widget.notificationData['log_id'],
-          'response': responseType,
-        }),
-      );
-
-      // Support prototype navigation even if mock/fallback notification (e.g. log_id 999 or 404 from server)
-      if (response.statusCode == 200 || widget.notificationData['log_id'] == 999) {
-        if (responseType == 'accepted') {
-          setState(() {
-            _navigationLaunched = true;
-            _isActioning = false;
-          });
-        } else {
-          state.clearNotification();
-        }
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (responseType == 'accepted') {
+        setState(() {
+          _navigationLaunched = true;
+          _isActioning = false;
+        });
       } else {
-        // Fallback for prototype testing so button action doesn't get blocked
-        if (responseType == 'accepted') {
-          setState(() {
-            _navigationLaunched = true;
-            _isActioning = false;
-          });
-        } else {
-          state.clearNotification();
-        }
+        state.clearNotification();
       }
     } catch (e) {
       if (responseType == 'accepted') {
@@ -1400,4 +1512,10 @@ class MapNavigationPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _GPSCoords {
+  final double latitude;
+  final double longitude;
+  _GPSCoords(this.latitude, this.longitude);
 }
