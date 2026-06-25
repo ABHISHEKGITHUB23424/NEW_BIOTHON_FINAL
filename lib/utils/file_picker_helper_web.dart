@@ -5,7 +5,7 @@ import 'file_picker_helper.dart';
 Future<PickedFile?> pickFile() async {
   final completer = Completer<PickedFile?>();
   final uploadInput = html.InputElement(type: 'file');
-  uploadInput.accept = 'image/*,application/pdf';
+  uploadInput.accept = 'image/*,application/pdf,application/json,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.csv,.json,.pdf,.doc,.docx';
   uploadInput.click();
 
   uploadInput.onChange.listen((e) {

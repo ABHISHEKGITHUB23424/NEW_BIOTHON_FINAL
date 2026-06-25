@@ -1975,7 +1975,7 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Govt Blood Bank License or NABL Approval PDF/Image (Required)',
+              'Govt Blood Bank License or NABL Approval PDF/Image/Word/CSV/JSON (Required)',
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
             const SizedBox(height: 12),
