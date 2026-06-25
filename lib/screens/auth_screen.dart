@@ -222,8 +222,8 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     }
 
     final age = _calculateAge(_regSelectedDob);
-    if (age < 18) {
-      setState(() => _errorMessage = "You must be 18 years or older to register.");
+    if (age < 15) {
+      setState(() => _errorMessage = "You must be 15 years or older to register.");
       return;
     }
 
@@ -1635,7 +1635,7 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
           context: context,
           initialDate: _regSelectedDob,
           firstDate: DateTime(1960),
-          lastDate: DateTime.now().subtract(const Duration(days: 18 * 365)),
+          lastDate: DateTime.now().subtract(const Duration(days: 15 * 365)),
         );
         if (date != null) setState(() => _regSelectedDob = date);
       },
@@ -1670,7 +1670,7 @@ class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
     Builder(
       builder: (context) {
         int calculatedAge = _calculateAge(_regSelectedDob);
-        bool isEligible = calculatedAge >= 18;
+        bool isEligible = calculatedAge >= 15;
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 4.0),
           child: Row(
