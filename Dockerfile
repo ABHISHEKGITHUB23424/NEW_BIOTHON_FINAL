@@ -10,7 +10,16 @@ WORKDIR /app
 
 # Copy requirements and install
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install dependencies in two stages to optimize memory usage
+RUN grep -v "prophet" requirements.txt > requirements_no_prophet.txt && \
+    pip install --no-cache-dir -r requirements_no_prophet.txt && \
+    rm requirements_no_prophet.txt
+
+RUN pip install --no-cache-dir prophet==1.3.0
+
+# Pre-install CmdStan during the build so it is ready at runtime
+RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(compiler=False)" || true
 
 # Copy backend source
 COPY backend/ ./backend/
