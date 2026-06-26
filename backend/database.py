@@ -21,41 +21,51 @@ def load_env():
 load_env()
 
 # Database connection details
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "bloodsense")
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_NAME = "bloodsense"
 
-DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-DEFAULT_DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/postgres"
-
-# Function to ensure target database exists
-def ensure_database_exists():
-    # Connect to the default 'postgres' database to check and create 'bloodsense'
-    temp_engine = create_engine(DEFAULT_DB_URL, isolation_level="AUTOCOMMIT")
+if DATABASE_URL:
     try:
-        with temp_engine.connect() as conn:
-            # Check if db exists using parameterized queries
-            result = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :dbname"),
-                {"dbname": DB_NAME}
-            )
-            exists = result.scalar()
-            if not exists:
-                # DDL identifiers cannot be parameterized, so we quote the database name to harden the query
-                safe_db_name = DB_NAME.replace('"', '""')
-                conn.execute(text(f'CREATE DATABASE "{safe_db_name}"'))
-                print(f"Database '{DB_NAME}' successfully created.")
-            else:
-                print(f"Database '{DB_NAME}' already exists.")
-    except Exception as e:
-        print(f"Warning: Could not check/create database '{DB_NAME}' automatically. Error: {e}")
-    finally:
-        temp_engine.dispose()
+        DB_NAME = DATABASE_URL.split("/")[-1].split("?")[0]
+    except Exception:
+        pass
+    print("Using direct DATABASE_URL connection.")
+else:
+    DB_USER = os.getenv("DB_USER", "postgres")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_PORT = os.getenv("DB_PORT", "5432")
+    DB_NAME = os.getenv("DB_NAME", "bloodsense")
+    
+    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    DEFAULT_DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/postgres"
 
-# Run database verification
-ensure_database_exists()
+    # Function to ensure target database exists
+    def ensure_database_exists():
+        # Connect to the default 'postgres' database to check and create 'bloodsense'
+        temp_engine = create_engine(DEFAULT_DB_URL, isolation_level="AUTOCOMMIT")
+        try:
+            with temp_engine.connect() as conn:
+                # Check if db exists using parameterized queries
+                result = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :dbname"),
+                    {"dbname": DB_NAME}
+                )
+                exists = result.scalar()
+                if not exists:
+                    # DDL identifiers cannot be parameterized, so we quote the database name to harden the query
+                    safe_db_name = DB_NAME.replace('"', '""')
+                    conn.execute(text(f'CREATE DATABASE "{safe_db_name}"'))
+                    print(f"Database '{DB_NAME}' successfully created.")
+                else:
+                    print(f"Database '{DB_NAME}' already exists.")
+        except Exception as e:
+            print(f"Warning: Could not check/create database '{DB_NAME}' automatically. Error: {e}")
+        finally:
+            temp_engine.dispose()
+
+    # Run database verification
+    ensure_database_exists()
 
 # Initialize Engine and Session
 engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
