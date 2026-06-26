@@ -133,7 +133,7 @@ class AppState extends ChangeNotifier {
   int? _donorId;
   int? _bankId;
   String _token = '';
-  String _backendUrl = 'https://new-biothon-final-backend.onrender.com'; // Default API Host
+  String _backendUrl = 'https://new-biothon-final-backend-xwc8.onrender.com'; // Default API Host
   
   // Simulation notifications
   Map<String, dynamic>? _pendingNotification;
@@ -154,9 +154,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> loadSession() async {
     final prefs = await SharedPreferences.getInstance();
-    _backendUrl = prefs.getString('backendUrl') ?? 'https://new-biothon-final-backend.onrender.com';
-    if (_backendUrl == 'http://localhost:8000') {
-      _backendUrl = 'https://new-biothon-final-backend.onrender.com';
+    _backendUrl = prefs.getString('backendUrl') ?? 'https://new-biothon-final-backend-xwc8.onrender.com';
+    if (_backendUrl == 'http://localhost:8000' || _backendUrl == 'https://new-biothon-final-backend.onrender.com') {
+      _backendUrl = 'https://new-biothon-final-backend-xwc8.onrender.com';
       await prefs.setString('backendUrl', _backendUrl);
     }
     _isLoggedIn = prefs.getBool('isLoggedIn') ?? false;
